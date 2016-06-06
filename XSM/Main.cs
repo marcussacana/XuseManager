@@ -5,14 +5,20 @@ namespace XSM
 {
     public class XuseManager
     {
+        private bool RepackMode = false;
+        private string RepackDir;
         public string[] Packgets { get; private set; } = new string[0];
-        public XuseManager(string Directory) {
+        public XuseManager(string Directory, bool CreateMode) {
             if (!System.IO.Directory.Exists(Directory))
                 throw new Exception("Invalid Directory");
+            RepackMode = CreateMode;
+            RepackDir = Directory;
+            if (RepackMode)
+                return;
             string[] Files = System.IO.Directory.GetFiles(Directory, "*.dll");
             foreach (string file in Files) {
                 string Packget = Path.GetDirectoryName(file) + "\\" + Path.GetFileNameWithoutExtension(file);
-                if (System.IO.File.Exists(Packget + ".gd")) {
+                if (System.IO.File.Exists(Packget + ".gd") && System.IO.File.Exists(Packget + ".dll")) {
                     string[] tmp = new string[Packgets.Length + 1];
                     Packgets.CopyTo(tmp, 0);
                     tmp[Packgets.Length] = Packget;
@@ -21,17 +27,20 @@ namespace XSM
             }
         }
 
-        public void Extract(int ID) {
+        public void Extract(int ID, bool Log) {
+            if (RepackMode)
+                return;
             //Initialize Variables
             Stream stream = new FileStream(Packgets[ID] + ".gd", FileMode.Open);
+
             byte[] OffsetTable = File.ReadAllBytes(Packgets[ID] + ".dll");
             uint FileCount = (((uint)OffsetTable.Length / 4u) / 2u) - 1u;
             string BaseDir = Packgets[ID] + "_Dump\\";
 
             //Start Extract
             Directory.CreateDirectory(BaseDir);
-            for (int i = 0; i < FileCount; i++) {
-                uint offpos = ((uint)i * 8u) + 4u;
+            for (uint i = 0; i < FileCount; i++) {
+                uint offpos = (i * 8u) + 4u;
                 byte[] DW = GetRange(offpos, 4, OffsetTable);
                 if (!BitConverter.IsLittleEndian)
                     Array.Reverse(DW, 0, DW.Length);
@@ -44,6 +53,8 @@ namespace XSM
 
                 stream.Position = Offset;
                 string FileName = BaseDir + GenHex(i);
+                if (Log)
+                    Console.WriteLine("Extracting file at " + GenHex(Offset) + "...");
                 if (File.Exists(FileName))
                     File.Delete(FileName);
                 Stream OutFile = new StreamWriter(FileName).BaseStream;
@@ -60,6 +71,101 @@ namespace XSM
             GiveExtension(BaseDir);
         }
 
+        public void CreatePackget(bool Log) {
+            string Dir = RepackDir;
+            if (!RepackMode)
+                return;
+            //Prepare Paths
+            string BaseDir = Path.GetDirectoryName(Dir) + "\\";
+            string PackgetName = Path.GetFileName(Dir).Replace("_Dump", "");
+
+            //Prepare Files
+            if (File.Exists(BaseDir + PackgetName + ".gd"))
+                if (File.Exists(BaseDir + PackgetName + "-backup.gd"))
+                    File.Delete(BaseDir + PackgetName + ".gd");
+                else
+                    File.Move(BaseDir + PackgetName + ".gd", BaseDir + PackgetName + "-backup.gd");
+
+            if (File.Exists(BaseDir + PackgetName + ".dll"))
+                if (File.Exists(BaseDir + PackgetName + "-backup.dll"))
+                    File.Delete(BaseDir + PackgetName + ".dll");
+                else
+                    File.Move(BaseDir + PackgetName + ".dll", BaseDir + PackgetName + "-backup.dll");
+
+            string[] files = Directory.GetFiles(Dir);
+            uint Count = 0;
+            string[] Extensions = new string[0];
+            foreach (string file in files)
+                try {
+                    string ext = Path.GetExtension(file);
+                    bool found = false;
+                    for (int i = 0; i < Extensions.Length; i++) {
+                        if (Extensions[i] == ext) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        string[] tmp = new string[Extensions.Length + 1];
+                        Extensions.CopyTo(tmp, 0);
+                        tmp[Extensions.Length] = ext;
+                        Extensions = tmp;
+                    }
+                    uint ID = uint.Parse(Path.GetFileNameWithoutExtension(file).Replace("0x", ""), System.Globalization.NumberStyles.HexNumber);
+                    if (ID > Count)
+                        Count = ID;
+                }
+                catch {
+                    throw new Exception("Invalid File Name");
+                }
+
+            byte[] OffsetTable = new byte[4 + (8 * Count)];
+            if (File.Exists(BaseDir + PackgetName + "-backup.dll")) {
+                byte[] temp = File.ReadAllBytes(BaseDir + PackgetName + "-backup.dll");
+                for (int i = 0; i < 4; i++)
+                    OffsetTable[i] = temp[i]; 
+            } else
+                BitConverter.GetBytes(Count).CopyTo(OffsetTable, 0);
+
+            Stream OutPackget = new StreamWriter(BaseDir + PackgetName + ".gd").BaseStream;
+            for (uint id = 0; id < Count; id++) {
+                bool found = false;
+                foreach (string file in files)
+                    if (uint.Parse(Path.GetFileNameWithoutExtension(file).Replace("0x", ""), System.Globalization.NumberStyles.HexNumber) == id) {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    throw new Exception("Missing " + GenHex(id));
+
+                string FName = string.Empty;
+                foreach (string Ext in Extensions) {
+                    string fn = Dir + "\\" + GenHex(id) + Ext;
+                    if (File.Exists(fn)) {
+                        FName = fn;
+                        break;
+                    }
+                }
+
+                Stream Reader = new StreamReader(FName).BaseStream;
+
+                uint OffPos = (id * 8) + 4;
+                BitConverter.GetBytes((uint)OutPackget.Position).CopyTo(OffsetTable, OffPos);
+                BitConverter.GetBytes((uint)Reader.Length).CopyTo(OffsetTable, OffPos + 4);
+                if (Log)
+                    Console.WriteLine("Writing File " + Path.GetFileNameWithoutExtension(FName) + " At " + GenHex((uint)OutPackget.Position));
+                while (Reader.Position < Reader.Length) {
+                    long ReamingLen = Reader.Length - Reader.Position;
+                    long BuffLen = 1024 * 2;
+                    byte[] Buffer = new byte[ReamingLen < BuffLen ? ReamingLen : BuffLen];
+                    Reader.Read(Buffer, 0, Buffer.Length);
+                    OutPackget.Write(Buffer, 0, Buffer.Length);
+                }
+                Reader.Close();
+            }
+            OutPackget.Close();
+            File.WriteAllBytes(BaseDir + PackgetName + ".dll", OffsetTable);
+        }
         private void GiveExtension(string Dir) {
             string[] Files = Directory.GetFiles(Dir);
             Format[] Formats = new Format[] {
@@ -143,7 +249,7 @@ namespace XSM
             public string Extension;
             public int[] Signature;
         }
-        private string GenHex(int i) {
+        private string GenHex(uint i) {
             string hex = i.ToString("X");
             while (hex.Length < 8)
                 hex = "0" + hex;
